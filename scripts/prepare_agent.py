@@ -106,6 +106,25 @@ def turns_block() -> str:
     )
 
 
+def progress_block() -> str:
+    """Ask for a task list only when something is actually reading it.
+
+    The list is mirrored into the source pull request's progress comment while
+    the run is in flight, which is the whole reason for spending turns on it.
+    With reporting off the instruction would be pure overhead, so it is omitted.
+    """
+    if env("AI_LEAN_PROGRESS_TASKS").lower() != "true":
+        return ""
+    return (
+        "\n## Progress reporting\n\n"
+        "Keep a `TodoWrite` task list from your first turn and update it as you\n"
+        "go: one entry per file or proof you intend to produce, marked in\n"
+        "progress when you start it and completed when its check passes. The\n"
+        "list is mirrored into a comment on the pull request while you work, so\n"
+        "it is what a reviewer sees; keep the entries short and specific.\n"
+    )
+
+
 def build_prompt(
     base: str, head: str, baseline_findings: list[str] | None = None
 ) -> str:
@@ -229,7 +248,7 @@ Add one or more Lean source files to the project. The requested files are:
 ## Project task
 
 {task}
-{turns_block()}{baseline_placeholder_block(baseline_findings or [])}
+{turns_block()}{progress_block()}{baseline_placeholder_block(baseline_findings or [])}
 ## Required imports
 
 ```lean

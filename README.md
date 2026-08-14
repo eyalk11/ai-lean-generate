@@ -6,6 +6,8 @@ agent cannot modify committed project files.
 
 ## What it does
 
+0. Posts a progress comment on the source pull request and keeps editing it
+   through the run, including a live view of the agent's own task list.
 1. Installs the toolchain from `lean-toolchain` and runs `lake build`.
 2. Scans committed sources for `sorry`/`admit`: with `deps-sorry-policy: warn`
    pre-existing placeholders are annotated and reported to the agent as
@@ -119,6 +121,9 @@ All composite-action inputs are strings. Write booleans as `"true"` or
 | `max-repair-attempts` | `2` | Reserved for compatibility; coding agents repair within their own turns |
 | `deps-sorry-policy` | `warn` | `warn` reports pre-existing placeholders (annotations, plus prompt context for out-of-dependency ones); `reject` fails the run on any of them |
 | `sorry-allowed-files` | `**/*_deps.lean` | Newline-separated dependency-file globs; under `warn` the agent prompt offers them as the sanctioned home for unavoidable placeholders |
+| `pr-number` | empty | Source pull request that receives the live progress comment; empty disables progress reporting |
+| `github-token` | empty | Token used only to post and edit that comment; needs `pull-requests: write` and is never exposed to the agent |
+| `progress-comment` | `"true"` | Post one comment when the run starts and edit it in place through every phase, mirroring the agent's own task list |
 | `ask-publish-on-failure` | `"true"` | On verification failure with generated files, query the agent once whether the partial result is worth a PR; strict final-word yes/no, anything unclear is no; claude-code only |
 
 Committed sources are scanned for `sorry`/`admit` before the agent runs. With
@@ -220,6 +225,62 @@ counts as no.
 Repository administrators can bypass a required check only if the branch rules
 or ruleset permits bypass. GitHub can be configured to forbid administrator
 bypass.
+
+## Live progress on the source pull request
+
+A run takes as long as Lean setup, a long agent session, and independent
+verification take together, and until it finished the pull request said nothing
+at all — a running job and a job that was never triggered looked identical.
+
+Give the action `pr-number` and a `github-token` with `pull-requests: write` and
+it posts one comment as soon as the work starts, then edits that same comment
+through every phase. Editing rather than appending is deliberate: reviewers get
+one notification, and what the comment says is always current instead of a
+column of stale updates.
+
+```yaml
+      - uses: eyalk11/ai-lean-generate@main
+        with:
+          pr-number: "123"
+          github-token: ${{ github.token }}
+```
+
+The comment carries the phase table (prepare, agent, verification, publish),
+the provider, model, head revision and turn budget, the agent's token use and
+cost once known, and a link to the run. While the agent is working it also
+mirrors the agent's own `TodoWrite` list, checkboxes and all, so a reviewer can
+watch which proof it is on. The task-list instruction is added to the agent
+prompt only when reporting is enabled, and `TodoWrite` is in the agent's tool
+allow-list for the same reason.
+
+Live mirroring works because Claude Code appends its session transcript as it
+runs, under the sandbox `HOME` inside `RUNNER_TEMP`. A watcher process outside
+the sandbox tails that file. The base action's execution log is written only
+after Claude exits, so it serves as the end-of-run fallback rather than the
+live source. Codex has no equivalent task list; it gets the phase table only.
+
+The token never reaches the agent. The sandbox runs with `--clearenv`, the
+agent steps blank `GITHUB_TOKEN` and `GH_TOKEN`, and only the progress steps
+receive `AI_LEAN_PROGRESS_TOKEN`. Every failure in the reporting path is a
+warning annotation: a GitHub API problem cannot fail a generation run.
+
+Later jobs — publishing, failure reporting — update the same comment through
+the small `progress` action, finding it by a hidden marker that carries the
+workflow run id, and restoring the accumulated state from a hidden block in the
+comment body:
+
+```yaml
+      - uses: eyalk11/ai-lean-generate/progress@main
+        with:
+          github-token: ${{ github.token }}
+          pr-number: "123"
+          phase: publish
+          status: ok
+          detail: ${{ steps.publish.outputs.pull-request-url }}
+```
+
+The reusable workflow wires all of this up already; set `progress-comment:
+false` to turn it off.
 
 ## Publish verified files
 
