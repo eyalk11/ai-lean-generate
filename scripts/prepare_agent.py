@@ -106,6 +106,10 @@ def turns_block() -> str:
     )
 
 
+def progress_tasks_enabled() -> bool:
+    return env("AI_LEAN_PROGRESS_TASKS").lower() == "true"
+
+
 def progress_block() -> str:
     """Ask for a task list only when something is actually reading it.
 
@@ -113,7 +117,7 @@ def progress_block() -> str:
     the run is in flight, which is the whole reason for spending turns on it.
     With reporting off the instruction would be pure overhead, so it is omitted.
     """
-    if env("AI_LEAN_PROGRESS_TASKS").lower() != "true":
+    if not progress_tasks_enabled():
         return ""
     return (
         "\n## Progress reporting\n\n"
@@ -293,6 +297,11 @@ esac
     wrapper.chmod(0o700)
     remove_persisted_github_auth()
     set_output("should-run", "true")
+    # Drives the TodoWrite grant. The tool is only worth its turns when the
+    # prompt asked for a list and the watcher is there to mirror it; granted
+    # unconditionally the agent reaches for it anyway and spends the turn
+    # budget on a list nobody reads.
+    set_output("progress-tasks", progress_tasks_enabled() and "true" or "false")
     return 0
 
 

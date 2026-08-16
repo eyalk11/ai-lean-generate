@@ -302,7 +302,7 @@ runs:
           --model ${{ inputs.model || 'claude-sonnet-4-6' }}
           --max-turns ${{ inputs.agent-max-turns }}
           --setting-sources user
-          --allowed-tools Read,Glob,Grep,Write,Edit,Bash,TodoWrite
+          --allowed-tools Read,Glob,Grep,Write,Edit,Bash${{ steps.prepare-agent.outputs.progress-tasks == 'true' && ',TodoWrite' || '' }}
 
     - name: Capture Claude diagnostics
       if: always() && inputs.provider == 'claude-code' && steps.prepare-agent.outputs.should-run == 'true'

@@ -139,13 +139,29 @@ class TodoExtractionTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_todo_write_is_granted_to_the_agent(self):
+    def test_todo_write_is_granted_only_when_a_list_is_asked_for(self):
+        # Granted unconditionally the agent uses it anyway, and every call
+        # costs a turn against --max-turns. That overran the budget on a run
+        # where reporting was off and nothing was reading the list.
         action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))
         step = next(
             s for s in action["runs"]["steps"]
             if s.get("id") == "claude-agent"
         )
-        self.assertIn("TodoWrite", step["with"]["claude_args"])
+        args = step["with"]["claude_args"]
+        self.assertIn("TodoWrite", args)
+        self.assertIn("steps.prepare-agent.outputs.progress-tasks == 'true'", args)
+
+    def test_the_todo_write_grant_tracks_the_prompt_instruction(self):
+        spec = importlib.util.spec_from_file_location(
+            "prepare_agent", ROOT / "scripts" / "prepare_agent.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for value, wanted in (("true", True), ("false", False), ("", False)):
+            with patch.dict(os.environ, {"AI_LEAN_PROGRESS_TASKS": value}):
+                self.assertEqual(module.progress_tasks_enabled(), wanted)
+                self.assertEqual(bool(module.progress_block()), wanted)
 
     def test_progress_phases_match_the_helper_action_documentation(self):
         helper = yaml.safe_load((ROOT / "progress" / "action.yml").read_text(encoding="utf-8"))
