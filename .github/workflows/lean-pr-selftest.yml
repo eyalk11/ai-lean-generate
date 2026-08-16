@@ -1,0 +1,61 @@
+name: AI Lean PR self-test
+
+# lean-pr.yml is workflow_call-only, so nothing in this repository exercised
+# it end to end -- the reusable pipeline was published without ever running
+# against a real pull request here. This caller dogfoods it: the progress
+# comment, the publish job and the cross-job comment state all need a genuine
+# pull_request event to appear at all.
+#
+# Paths deliberately exclude the workflow files themselves. A pull request that
+# only edits CI has no changed Lean source to formalize, so the run would
+# report "nothing to do" and still cost a full Lean setup.
+
+on:
+  pull_request:
+    paths:
+      - "proofs/**"
+      - "**/*.lean"
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: Pull request number to run against.
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  lean:
+    uses: ./.github/workflows/lean-pr.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      pr-number: ${{ inputs.pr-number || 0 }}
+      provider: claude-code
+      model: claude-sonnet-4-6
+      source-paths: |
+        proofs/*.md
+        *.lean
+        **/*.lean
+      context-files: |
+        Simple.lean
+        proofs/*.md
+        lakefile.toml
+        lean-toolchain
+      imports: |
+        Simple
+      task: |
+        Formalize the changed human-language theorem and proof as a Lean
+        theorem. Keep the formalization faithful to the stated claim.
+      deps-sorry-policy: reject
+      axiom-policy: reject
+      max-output-tokens: "8192"
+      agent-max-turns: "12"
+    # inherit rather than an explicit secret list: the provider credential is
+    # an environment secret, and only the called workflow's generate job
+    # declares `environment: main`. Naming the secret here would resolve it in
+    # this caller's scope, where that environment is not applied, and pass an
+    # empty value on to the agent.
+    secrets: inherit
