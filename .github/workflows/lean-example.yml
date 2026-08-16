@@ -55,6 +55,13 @@ jobs:
           deps-sorry-policy: reject
           max-input-tokens: "10000"
           max-output-tokens: "8192"
+          # Observed 13, 18, 21 and 26 turns across runs of this same
+          # single-theorem task. The action's default of 20 sits inside that
+          # spread, so roughly half of all runs failed with "Claude reported a
+          # successful result after N turns, exceeding the configured maximum"
+          # -- discarding work the agent had actually finished. Budget for the
+          # top of the observed range rather than the middle.
+          agent-max-turns: "30"
           max-repair-attempts: "1"
           verification-command: |
             test -z "${CLAUDE_CODE_OAUTH_TOKEN:-}"
