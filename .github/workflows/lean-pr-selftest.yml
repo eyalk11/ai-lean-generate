@@ -96,6 +96,9 @@ jobs:
           deps-sorry-policy: reject
           axiom-policy: reject
           max-output-tokens: "8192"
+          # Same observed 13-26 turn spread as lean-example.yml; 20 is inside
+          # it and fails runs whose work had succeeded.
+          agent-max-turns: "30"
           pr-number: ${{ needs.inspect.outputs.pr_number }}
           github-token: ${{ github.token }}
           progress-comment: "true"
