@@ -78,6 +78,37 @@ class StateRoundTripTests(unittest.TestCase):
         restored = MODULE.parse_body(MODULE.render(state))
         self.assertEqual(restored["details"]["verify"], "arrow --> here")
 
+    def test_a_concurrent_reader_never_sees_a_half_written_state(self):
+        """The watcher and the phase setters share the file; a torn read would
+        rerender the comment with every phase reset to queued."""
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory) / ".ai-lean-generate"
+            with patch.object(MODULE, "WORK", work), \
+                    patch.object(MODULE, "STATE", work / "progress.json"):
+                state = MODULE.blank_state()
+                state["phases"] = {"prepare": "ok", "agent": "ok",
+                                   "verify": "ok", "publish": "running"}
+                MODULE.save_state(state)
+                # Only the final state file is ever left behind: no partial
+                # temp file is mistaken for it, and the rename is atomic.
+                self.assertEqual([p.name for p in sorted(work.iterdir())],
+                                 ["progress.json"])
+                self.assertEqual(MODULE.load_state()["phases"], state["phases"])
+
+    def test_an_unreadable_state_file_is_treated_as_absent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory) / ".ai-lean-generate"
+            work.mkdir()
+            state_path = work / "progress.json"
+            state_path.write_text('{"phases": {"prepare": "ok"', encoding="utf-8")
+            with patch.object(MODULE, "WORK", work), \
+                    patch.object(MODULE, "STATE", state_path):
+                # None tells command_set to rebuild from the comment body
+                # instead of silently resetting the table to a blank state.
+                self.assertIsNone(MODULE.read_state_file())
+                self.assertEqual(MODULE.load_state()["phases"],
+                                 {key: "pending" for key, _ in MODULE.PHASES})
+
     def test_missing_state_block_yields_a_blank_state(self):
         self.assertEqual(MODULE.parse_body("just a comment"), MODULE.blank_state())
 
