@@ -55,8 +55,16 @@ jobs:
           deps-sorry-policy: reject
           max-input-tokens: "10000"
           max-output-tokens: "8192"
+          # Observed 13, 18, 21 and 26 turns across runs of this same
+          # single-theorem task. The action's default of 20 sits inside that
+          # spread, so roughly half of all runs failed with "Claude reported a
+          # successful result after N turns, exceeding the configured maximum"
+          # -- discarding work the agent had actually finished. Budget for the
+          # top of the observed range rather than the middle.
+          agent-max-turns: "30"
           max-repair-attempts: "1"
           verification-command: |
+            test -z "${CLAUDE_CODE_OAUTH_TOKEN:-}"
             test -z "${ANTHROPIC_API_KEY:-}"
             test -z "${GITHUB_TOKEN:-}"
             test -z "${GH_TOKEN:-}"
@@ -64,5 +72,9 @@ jobs:
             test -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
             test -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
             ! git config --local --get-all http.https://github.com/.extraheader
+        # A long-lived OAuth credential rather than an API key. Only one of the
+        # two may be set: claude-code-base-action prefers anthropic_api_key when
+        # it is non-empty, so leaving a stale ANTHROPIC_API_KEY alongside this
+        # would keep authenticating with the wrong secret.
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

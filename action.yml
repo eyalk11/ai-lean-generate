@@ -126,6 +126,27 @@ inputs:
     description: Newline-separated dependency file globs where baseline assumptions may use sorry/admit.
     required: false
     default: "**/*_deps.lean"
+  pr-number:
+    description: |
+      Source pull request that receives the live progress comment. Empty
+      disables progress reporting.
+    required: false
+    default: ""
+  github-token:
+    description: |
+      Token used only to post and edit the progress comment on pr-number. It
+      needs pull-requests: write and nothing else. It is never exposed to the
+      coding agent: the sandbox runs with --clearenv and the agent step blanks
+      GITHUB_TOKEN and GH_TOKEN explicitly.
+    required: false
+    default: ""
+  progress-comment:
+    description: |
+      Post one comment on the source pull request when the run starts and edit
+      it in place as phases complete, including a live mirror of the coding
+      agent's own task list. Requires pr-number and github-token.
+    required: false
+    default: "true"
   ask-publish-on-failure:
     description: |
       When independent verification fails but generated files exist, ask the
@@ -148,6 +169,9 @@ outputs:
   publish-on-failure:
     description: '"true" when verification failed but the agent judged the partial result worth publishing.'
     value: ${{ steps.publish-verdict.outputs.publish-on-failure }}
+  progress-comment-id:
+    description: ID of the progress comment posted on the source pull request.
+    value: ${{ steps.progress-start.outputs.progress-comment-id }}
 
 runs:
   using: composite
@@ -188,12 +212,60 @@ runs:
         AI_LEAN_EDIT_POLICY: ${{ inputs.edit-policy }}
         AI_LEAN_PROJECT_MAPPING_FILES: ${{ inputs.project-mapping-files }}
         AI_LEAN_AGENT_MAX_TURNS: ${{ inputs.agent-max-turns }}
+        AI_LEAN_PROGRESS_TASKS: ${{ inputs.progress-comment == 'true' && inputs.pr-number != '' && inputs.github-token != '' }}
       run: python3 "$GITHUB_ACTION_PATH/scripts/prepare_agent.py"
+
+    # Posted before any long-running step so the pull request shows the run is
+    # alive from the start. Everything afterwards edits this same comment, so
+    # the notification fires once and the visible state is never stale.
+    - name: Open the pull-request progress comment
+      id: progress-start
+      if: >-
+        inputs.progress-comment == 'true' && inputs.pr-number != ''
+        && inputs.github-token != ''
+        && steps.prepare-agent.outputs.should-run == 'true'
+      shell: bash
+      env:
+        AI_LEAN_PROGRESS_TOKEN: ${{ inputs.github-token }}
+        AI_LEAN_PR_NUMBER: ${{ inputs.pr-number }}
+        AI_LEAN_PROGRESS_PROVIDER: ${{ inputs.provider }}
+        AI_LEAN_PROGRESS_MODEL: ${{ inputs.model }}
+        AI_LEAN_PROGRESS_MAX_TURNS: ${{ inputs.agent-max-turns }}
+        AI_LEAN_PROGRESS_HEAD_SHA: ${{ inputs.head-sha || github.event.pull_request.head.sha }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/scripts/pr_progress.py" \
+          set --phase prepare --status ok
+        python3 "$GITHUB_ACTION_PATH/scripts/pr_progress.py" \
+          set --phase agent --status running --detail "agent starting"
 
     - name: Set up Claude Code sandbox
       if: inputs.provider == 'claude-code' && steps.prepare-agent.outputs.should-run == 'true'
       shell: bash
       run: bash "$GITHUB_ACTION_PATH/scripts/setup_claude_sandbox.sh"
+
+    # The base action writes its execution log only after Claude exits, so it
+    # cannot drive a live view. The CLI's own session transcript is appended
+    # continuously under the sandbox HOME, which lives in RUNNER_TEMP and is
+    # readable from the runner, so a background watcher outside the sandbox can
+    # follow the agent's TodoWrite list while it works.
+    - name: Start the agent task-list watcher
+      if: >-
+        inputs.provider == 'claude-code' && steps.progress-start.outcome == 'success'
+        && steps.prepare-agent.outputs.should-run == 'true'
+      shell: bash
+      env:
+        AI_LEAN_PROGRESS_TOKEN: ${{ inputs.github-token }}
+        AI_LEAN_PR_NUMBER: ${{ inputs.pr-number }}
+        AI_LEAN_PROGRESS_PROVIDER: ${{ inputs.provider }}
+        AI_LEAN_PROGRESS_MODEL: ${{ inputs.model }}
+        AI_LEAN_PROGRESS_MAX_TURNS: ${{ inputs.agent-max-turns }}
+        AI_LEAN_PROGRESS_HEAD_SHA: ${{ inputs.head-sha || github.event.pull_request.head.sha }}
+      run: |
+        mkdir -p .ai-lean-generate
+        rm -f .ai-lean-generate/progress-watch.stop
+        nohup python3 "$GITHUB_ACTION_PATH/scripts/pr_progress.py" watch \
+          > .ai-lean-generate/progress-watch.log 2>&1 &
+        echo "$!" > .ai-lean-generate/progress-watch.pid
 
     # Bash is unrestricted on purpose. The per-command allowlist stopped being
     # a boundary once the agent had workspace write, because it could rewrite
@@ -230,7 +302,7 @@ runs:
           --model ${{ inputs.model || 'claude-sonnet-4-6' }}
           --max-turns ${{ inputs.agent-max-turns }}
           --setting-sources user
-          --allowed-tools Read,Glob,Grep,Write,Edit,Bash
+          --allowed-tools Read,Glob,Grep,Write,Edit,Bash${{ steps.prepare-agent.outputs.progress-tasks == 'true' && ',TodoWrite' || '' }}
 
     - name: Capture Claude diagnostics
       if: always() && inputs.provider == 'claude-code' && steps.prepare-agent.outputs.should-run == 'true'
@@ -259,7 +331,41 @@ runs:
         # execution log is written unconditionally.
         python3 "$GITHUB_ACTION_PATH/scripts/token_usage_report.py" || true
 
+    - name: Report the agent result on the pull request
+      if: >-
+        always() && steps.progress-start.outcome == 'success'
+        && inputs.provider == 'claude-code'
+      shell: bash
+      env:
+        AI_LEAN_PROGRESS_TOKEN: ${{ inputs.github-token }}
+        AI_LEAN_PR_NUMBER: ${{ inputs.pr-number }}
+        AI_LEAN_PROGRESS_PROVIDER: ${{ inputs.provider }}
+        AI_LEAN_PROGRESS_MODEL: ${{ inputs.model }}
+        AI_LEAN_PROGRESS_MAX_TURNS: ${{ inputs.agent-max-turns }}
+        AI_LEAN_PROGRESS_HEAD_SHA: ${{ inputs.head-sha || github.event.pull_request.head.sha }}
+        CLAUDE_OUTCOME: ${{ steps.claude-agent.outcome }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/scripts/pr_progress.py" stop || true
+        pid="$(cat .ai-lean-generate/progress-watch.pid 2>/dev/null || true)"
+        if [ -n "$pid" ]; then
+          kill "$pid" 2>/dev/null || true
+        fi
+        if [ "${CLAUDE_OUTCOME:-}" = "success" ]; then
+          status=ok
+          detail="agent finished; verifying independently"
+        else
+          status=fail
+          detail="agent step outcome: ${CLAUDE_OUTCOME:-unknown}"
+        fi
+        python3 "$GITHUB_ACTION_PATH/scripts/pr_progress.py" \
+          set --phase agent --status "$status" --detail "$detail" --refresh-todos
+        if [ "$status" = ok ]; then
+          python3 "$GITHUB_ACTION_PATH/scripts/pr_progress.py" \
+            set --phase verify --status running
+        fi
+
     - name: Generate and test with Codex
+      id: codex-agent
       if: inputs.provider == 'codex' && steps.prepare-agent.outputs.should-run == 'true'
       uses: openai/codex-action@v1
       env:
@@ -272,6 +378,31 @@ runs:
         model: ${{ inputs.model }}
         sandbox: workspace-write
         safety-strategy: drop-sudo
+
+    # Codex has no task list to mirror and no watcher, so it only needs the
+    # phase transition the Claude branch does above.
+    - name: Report the Codex result on the pull request
+      if: >-
+        always() && steps.progress-start.outcome == 'success'
+        && inputs.provider == 'codex'
+      shell: bash
+      env:
+        AI_LEAN_PROGRESS_TOKEN: ${{ inputs.github-token }}
+        AI_LEAN_PR_NUMBER: ${{ inputs.pr-number }}
+        AI_LEAN_PROGRESS_PROVIDER: ${{ inputs.provider }}
+        AI_LEAN_PROGRESS_MODEL: ${{ inputs.model }}
+        AI_LEAN_PROGRESS_HEAD_SHA: ${{ inputs.head-sha || github.event.pull_request.head.sha }}
+        CODEX_OUTCOME: ${{ steps.codex-agent.outcome }}
+      run: |
+        if [ "${CODEX_OUTCOME:-}" = "success" ]; then
+          python3 "$GITHUB_ACTION_PATH/scripts/pr_progress.py" \
+            set --phase agent --status ok --detail "agent finished; verifying independently"
+          python3 "$GITHUB_ACTION_PATH/scripts/pr_progress.py" \
+            set --phase verify --status running
+        else
+          python3 "$GITHUB_ACTION_PATH/scripts/pr_progress.py" \
+            set --phase agent --status fail --detail "agent step outcome: ${CODEX_OUTCOME:-unknown}"
+        fi
 
     - name: Independently verify coding-agent result
       id: verify-agent
@@ -287,6 +418,37 @@ runs:
         AI_LEAN_PROJECT_MAPPING_FILES: ${{ inputs.project-mapping-files }}
         AI_LEAN_SORRY_ALLOWED_FILES: ${{ inputs.sorry-allowed-files }}
       run: python3 "$GITHUB_ACTION_PATH/scripts/verify_agent.py"
+
+    - name: Report the verification result on the pull request
+      if: always() && steps.progress-start.outcome == 'success'
+      shell: bash
+      env:
+        AI_LEAN_PROGRESS_TOKEN: ${{ inputs.github-token }}
+        AI_LEAN_PR_NUMBER: ${{ inputs.pr-number }}
+        AI_LEAN_PROGRESS_PROVIDER: ${{ inputs.provider }}
+        AI_LEAN_PROGRESS_MODEL: ${{ inputs.model }}
+        AI_LEAN_PROGRESS_MAX_TURNS: ${{ inputs.agent-max-turns }}
+        AI_LEAN_PROGRESS_HEAD_SHA: ${{ inputs.head-sha || github.event.pull_request.head.sha }}
+        VERIFY_OUTCOME: ${{ steps.verify-agent.outcome }}
+        GENERATED_FILES: ${{ steps.verify-agent.outputs.generated-files }}
+      run: |
+        count="$(printf '%s\n' "$GENERATED_FILES" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+        case "${VERIFY_OUTCOME:-}" in
+          success)
+            detail="$count Lean file(s) compiled and the project build passed"
+            status=ok
+            ;;
+          skipped|"")
+            detail="not reached"
+            status=skip
+            ;;
+          *)
+            detail="verification failed with $count generated Lean file(s)"
+            status=fail
+            ;;
+        esac
+        python3 "$GITHUB_ACTION_PATH/scripts/pr_progress.py" \
+          set --phase verify --status "$status" --detail "$detail"
 
     # A verification failure with generated files present is a partial result,
     # and only the agent has read them all. One cheap read-only query decides
@@ -355,6 +517,8 @@ runs:
           .ai-lean-generate/check-files.txt
           .ai-lean-generate/run-lean-sanitized.sh
           .ai-lean-generate/token-usage.json
+          .ai-lean-generate/progress.json
+          .ai-lean-generate/progress-watch.log
         if-no-files-found: warn
         include-hidden-files: true
 

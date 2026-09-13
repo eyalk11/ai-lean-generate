@@ -1,0 +1,173 @@
+name: AI Lean PR self-test
+
+# A local mirror of lean-pr.yml, and it has to be a mirror rather than a caller.
+#
+# lean-pr.yml pins `eyalk11/ai-lean-generate@main` for the action, publish/ and
+# progress/, because it is consumed by other repositories where `./` would
+# resolve to the caller's checkout. That pin means a pull request against THIS
+# repository cannot exercise its own changes: the workflow runs from the branch
+# but loads the action from main. A change to action.yml surfaces only as
+# "##[warning]Unexpected input(s)" and is silently ignored, and a newly added
+# action directory fails outright with "Can't find action.yml".
+#
+# So this workflow duplicates the job graph with `./`, `./publish` and
+# `./progress`, testing the working tree instead of the last release. Keep it in
+# step with lean-pr.yml when that file's job graph changes.
+
+on:
+  pull_request:
+    paths:
+      - "proofs/**"
+      - "**/*.lean"
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: Pull request number to run against.
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+      head_branch: ${{ steps.pr.outputs.head_branch }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+    steps:
+      - name: Read and validate the pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_json="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json baseRefOid,headRefName,headRefOid,headRepositoryOwner)"
+          owner="$(jq -r '.headRepositoryOwner.login' <<<"$pr_json")"
+          if [[ "$owner" != "$GITHUB_REPOSITORY_OWNER" ]]; then
+            echo "::error::Fork pull requests cannot receive provider secrets or generated commits."
+            exit 1
+          fi
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "base_sha=$(jq -r '.baseRefOid' <<<"$pr_json")"
+            echo "head_branch=$(jq -r '.headRefName' <<<"$pr_json")"
+            echo "head_sha=$(jq -r '.headRefOid' <<<"$pr_json")"
+          } >> "$GITHUB_OUTPUT"
+
+  generate:
+    needs: inspect
+    runs-on: ubuntu-latest
+    environment: main
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      publish-anyway: ${{ steps.lean.outputs.publish-on-failure }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.inspect.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate and independently verify Lean files
+        id: lean
+        uses: ./
+        with:
+          provider: claude-code
+          model: claude-sonnet-4-6
+          artifact-name: ai-lean-generate-${{ github.run_id }}
+          base-sha: ${{ needs.inspect.outputs.base_sha }}
+          head-sha: ${{ needs.inspect.outputs.head_sha }}
+          imports: |
+            Simple
+          task: |
+            Formalize the changed human-language theorem and proof as a Lean
+            theorem. Keep the formalization faithful to the stated claim.
+          deps-sorry-policy: reject
+          axiom-policy: reject
+          max-output-tokens: "8192"
+          # Same observed 13-26 turn spread as lean-example.yml; 20 is inside
+          # it and fails runs whose work had succeeded.
+          agent-max-turns: "30"
+          pr-number: ${{ needs.inspect.outputs.pr_number }}
+          github-token: ${{ github.token }}
+          progress-comment: "true"
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+  publish:
+    needs: [inspect, generate]
+    if: >-
+      always() && needs.inspect.result == 'success'
+      && (needs.generate.result == 'success'
+          || (needs.generate.result == 'failure'
+              && needs.generate.outputs.publish-anyway == 'true'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      pull-request-url: ${{ steps.publish.outputs.pull-request-url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.inspect.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai-lean-generate-${{ github.run_id }}
+          path: .
+      - uses: ./publish
+        id: publish
+        with:
+          github-token: ${{ github.token }}
+          base-branch: ${{ needs.inspect.outputs.head_branch }}
+          source-pr: ${{ needs.inspect.outputs.pr_number }}
+
+      # The whole point of the exercise: a different runner with no state file,
+      # restoring the accumulated table from the comment itself.
+      - name: Close out the progress comment
+        if: always()
+        uses: ./progress
+        with:
+          github-token: ${{ github.token }}
+          pr-number: ${{ needs.inspect.outputs.pr_number }}
+          phase: publish
+          status: ${{ steps.publish.outputs.pull-request-url != '' && 'ok' || 'fail' }}
+          detail: ${{ steps.publish.outputs.pull-request-url || 'no pull request was opened' }}
+
+  report-failure:
+    needs: [inspect, generate, publish]
+    if: >-
+      always() && needs.inspect.result == 'success'
+      && needs.generate.result == 'failure'
+      && needs.publish.outputs.pull-request-url == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.inspect.outputs.head_sha }}
+          persist-credentials: false
+      - name: Mark the progress comment as not published
+        if: always()
+        uses: ./progress
+        with:
+          github-token: ${{ github.token }}
+          pr-number: ${{ needs.inspect.outputs.pr_number }}
+          phase: publish
+          status: skip
+          detail: nothing was published; see the run diagnostics

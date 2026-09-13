@@ -144,6 +144,15 @@ on:
         required: false
         default: ""
         type: string
+      progress-comment:
+        description: |
+          Post one comment on the source pull request when the run starts and
+          edit it in place through every phase, mirroring the coding agent's own
+          task list while it works. Requires pull-requests: write, which this
+          workflow already requests.
+        required: false
+        default: true
+        type: boolean
       publish:
         description: Open a child PR containing verified Lean additions.
         required: false
@@ -205,6 +214,11 @@ jobs:
     environment: ${{ inputs.environment-name }}
     permissions:
       contents: read
+      # Only so the run can report itself on the source pull request while it
+      # works. The coding agent never sees this token: the bubblewrap sandbox
+      # runs with --clearenv and the agent step blanks GITHUB_TOKEN and
+      # GH_TOKEN, so it reaches the progress steps and nothing else.
+      pull-requests: write
     outputs:
       publish-anyway: ${{ steps.lean.outputs.publish-on-failure }}
     steps:
@@ -306,6 +320,9 @@ jobs:
           project-mapping-files: ${{ inputs.project-mapping-files }}
           verification-command: ${{ inputs.verification-command }}
           ask-publish-on-failure: ${{ inputs.ask-publish-on-failure }}
+          pr-number: ${{ needs.inspect.outputs.pr_number }}
+          github-token: ${{ inputs.progress-comment && github.token || '' }}
+          progress-comment: ${{ inputs.progress-comment }}
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -372,6 +389,36 @@ jobs:
             "$detail Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")"
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$body"
 
+      # The comment above notifies; editing the run's progress comment does not,
+      # so both exist on purpose: one pings reviewers with the new pull request,
+      # the other keeps the run's own status line accurate.
+      - name: Close out the progress comment
+        if: always() && inputs.progress-comment
+        uses: eyalk11/ai-lean-generate/progress@main
+        with:
+          github-token: ${{ github.token }}
+          pr-number: ${{ needs.inspect.outputs.pr_number }}
+          phase: publish
+          status: ${{ steps.publish.outputs.pull-request-url != '' && 'ok' || 'fail' }}
+          detail: ${{ steps.publish.outputs.pull-request-url || 'no pull request was opened' }}
+
+  # With publishing off, no later job would ever resolve the publish row and the
+  # comment would sit on "queued" after the run ended.
+  progress-close:
+    needs: [inspect, generate]
+    if: always() && inputs.progress-comment && !inputs.publish && needs.inspect.result == 'success'
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: eyalk11/ai-lean-generate/progress@main
+        with:
+          github-token: ${{ github.token }}
+          pr-number: ${{ needs.inspect.outputs.pr_number }}
+          phase: publish
+          status: skip
+          detail: publishing is disabled for this workflow
+
   report-failure:
     needs: [inspect, generate, publish]
     # Skipped when a marked partial-result pull request was published: its own
@@ -396,3 +443,13 @@ jobs:
           Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           Diagnostics artifact, when available: ai-lean-generate-${GITHUB_RUN_ID}"
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$body"
+
+      - name: Mark the progress comment as not published
+        if: always() && inputs.progress-comment
+        uses: eyalk11/ai-lean-generate/progress@main
+        with:
+          github-token: ${{ github.token }}
+          pr-number: ${{ needs.inspect.outputs.pr_number }}
+          phase: publish
+          status: skip
+          detail: nothing was published; see the run diagnostics

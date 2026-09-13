@@ -1,0 +1,41 @@
+name: Update AI Lean Progress Comment
+description: Edit the run's progress comment on the source pull request from a later job.
+
+# The generate job posts and maintains the comment while it runs, but the
+# publish and failure-reporting jobs run afterwards, on different runners, with
+# different permissions. They find the same comment through the hidden marker,
+# which carries the workflow run id, so no comment id has to be threaded
+# between jobs.
+
+inputs:
+  github-token:
+    description: "Token with pull-requests: write."
+    required: true
+  pr-number:
+    description: Source pull request carrying the progress comment.
+    required: true
+  phase:
+    description: Phase to update. One of prepare, agent, verify, publish.
+    required: true
+  status:
+    description: One of pending, running, ok, fail, skip.
+    required: true
+  detail:
+    description: Short detail cell for the phase row.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Update the progress comment
+      shell: bash
+      env:
+        AI_LEAN_PROGRESS_TOKEN: ${{ inputs.github-token }}
+        AI_LEAN_PR_NUMBER: ${{ inputs.pr-number }}
+        PHASE: ${{ inputs.phase }}
+        STATUS: ${{ inputs.status }}
+        DETAIL: ${{ inputs.detail }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../scripts/pr_progress.py" \
+          set --phase "$PHASE" --status "$STATUS" --detail "$DETAIL"
