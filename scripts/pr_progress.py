@@ -152,14 +152,20 @@ def blank_state() -> dict:
     }
 
 
-def load_state() -> dict:
+def read_state_file() -> dict | None:
+    """Return the stored state, or None when there is nothing usable to read."""
     try:
         state = json.loads(STATE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return blank_state()
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def load_state() -> dict:
     merged = blank_state()
-    if isinstance(state, dict):
-        merged.update({k: v for k, v in state.items() if k in merged})
+    stored = read_state_file()
+    if stored is not None:
+        merged.update({k: v for k, v in stored.items() if k in merged})
     return merged
 
 
@@ -189,8 +195,19 @@ def parse_body(body: str) -> dict:
 
 
 def save_state(state: dict) -> None:
+    """Replace the state file atomically.
+
+    The task-list watcher and the phase setters are separate processes sharing
+    this file, so a plain write is readable in its truncated half-written form.
+    A torn read parses as nothing, falls back to a blank state, and republishes
+    the comment with every phase row reset to "queued" -- exactly the stale,
+    wrong reporting this feature exists to avoid. Writing a sibling temp file
+    and renaming it means a reader sees either the old state or the new one.
+    """
     WORK.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    temp = STATE.with_name(f"{STATE.name}.{os.getpid()}.tmp")
+    temp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    os.replace(temp, STATE)
 
 
 # --------------------------------------------------------------------------
@@ -415,7 +432,7 @@ def set_output(name: str, value: str) -> None:
 
 def command_set(args: argparse.Namespace) -> None:
     state = load_state()
-    if not STATE.is_file() and env("AI_LEAN_PROGRESS_TOKEN"):
+    if read_state_file() is None and env("AI_LEAN_PROGRESS_TOKEN"):
         comment_id, body = find_comment(with_body=True)
         if comment_id:
             state = parse_body(body)
