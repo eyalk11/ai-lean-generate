@@ -28,8 +28,29 @@ agent cannot modify committed project files.
 ## Claude Code with a GitHub environment
 
 GitHub environments are selected on the caller's **job**, not inside a
-composite action. If an environment named `main` contains an API-key secret
-named `CLAUDE_CODE_KEY`, use:
+composite action. For Claude Pro or Max accounts, the recommended credential is
+a Claude Code OAuth token. Generate or refresh it on a trusted local machine
+where Claude Code is signed in to the account that should fund the runs:
+
+```text
+claude setup-token
+```
+
+Then update the calling repository's GitHub environment secret. This command
+creates `CLAUDE_CODE_OAUTH_TOKEN` if it is missing and replaces its current
+value if it already exists:
+
+```text
+gh secret set CLAUDE_CODE_OAUTH_TOKEN --env main --repo OWNER/REPOSITORY
+```
+
+When run from the calling repository, `--repo OWNER/REPOSITORY` may be omitted.
+The equivalent UI path is **Settings → Environments → main → Environment
+secrets → CLAUDE_CODE_OAUTH_TOKEN → Update**. The environment and secret belong
+to the calling repository, not to `ai-lean-generate`. Never commit the token or
+put it directly in a workflow file.
+
+Use the environment secret in the caller workflow as follows:
 
 ```yaml
 name: AI Lean Generate
@@ -63,20 +84,18 @@ jobs:
             lean-toolchain
           deps-sorry-policy: reject
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_KEY }}
-```
-
-`CLAUDE_CODE_KEY` is the repository/environment secret's name. It is mapped to
-`ANTHROPIC_API_KEY` because that is the variable consumed by the upstream
-Claude Code action. For a long-lived Claude Code OAuth credential instead:
-
-```yaml
-        env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
 
 The environment may require approval before the job starts, depending on its
-GitHub protection rules.
+GitHub protection rules. If an Anthropic API key is preferred instead, store it
+as an environment secret such as `CLAUDE_CODE_KEY` and map it to the upstream
+action's expected variable:
+
+```yaml
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_KEY }}
+```
 
 ## Codex
 
