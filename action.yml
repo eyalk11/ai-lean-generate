@@ -518,6 +518,7 @@ runs:
           .ai-lean-generate/run-lean-sanitized.sh
           .ai-lean-generate/token-usage.json
           .ai-lean-generate/progress.json
+          .ai-lean-generate/progress-watch.log
         if-no-files-found: warn
         include-hidden-files: true
 
